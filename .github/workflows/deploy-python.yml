@@ -1,0 +1,230 @@
+# Scratch probe, the Python deploy path, called by a scratch caller with `secrets: inherit`.
+#
+# It mirrors a reusable deploy that creates a production deployment without its domains, smokes it, then promotes it,
+# and records what a later design rests on. The deployment is stamped with the version, the commit, the run, its
+# attempt and the time the job's first step recorded. The job reads back the stamp, the production target and every
+# alias, compares the candidate's stamped start with the live deployment's, and times the promotion. A later job holds
+# the attempt's start, as GitHub records it, against every step's start. Every line is a comparison, an id, a hostname
+# or a time, never a token, a bypass value or a setting's value.
+
+name: Probe, Python deploy (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: The caller's environment holding the scratch project's token, ids and bypass value
+        type: string
+        default: py
+      version:
+        description: The version written into the stamp
+        type: string
+        default: probe
+      mid_change:
+        description: none, before_deploy or after_deploy, when the job sets PROBE_SETTING to mid_value
+        type: string
+        default: none
+      mid_value:
+        description: The named scratch value the mid change sets
+        type: string
+        default: three
+      expect_setting:
+        description: The named value the candidate is expected to read, reported and never failing
+        type: string
+        default: ""
+      promote:
+        description: Whether to promote the candidate after the smoke
+        type: boolean
+        default: true
+      expect_fresh:
+        description: The freshness verdict expected before the promotion, or empty to report it alone
+        type: string
+        default: ""
+    outputs:
+      url:
+        description: The candidate's deployment URL
+        value: ${{ jobs.deploy.outputs.url }}
+      started_at:
+        description: The time the deploy job's first step recorded
+        value: ${{ jobs.deploy.outputs.started_at }}
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  deploy:
+    name: Deploy, Python
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: probe-deploy-${{ github.repository }}-${{ inputs.environment }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    outputs:
+      url: ${{ steps.deploy.outputs.url }}
+      started_at: ${{ steps.start.outputs.started_at }}
+    steps:
+      - name: Record the start, before any setting is read
+        id: start
+        run: |
+          started="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+          echo "started_at=$started" >> "$GITHUB_OUTPUT"
+          echo "first step at $started, run $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT"
+
+      - name: Check out the caller
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Check out the probe scripts
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: Needless2Say/probe-cicd
+          ref: main
+          sparse-checkout: scripts
+          path: _probe
+          persist-credentials: false
+
+      - name: Install the Vercel CLI
+        run: npm install -g vercel@58.5.1
+
+      - name: Prepare the token
+        id: token
+        run: |
+          TOKEN="$(printf '%s' "$VERCEL_TOKEN" | tr -d '[:space:]')"
+          if [ -z "$TOKEN" ]; then
+            echo "::error::VERCEL_TOKEN is empty in this environment"
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+
+      - name: Change the setting before the deployment exists
+        if: inputs.mid_change == 'before_deploy'
+        run: python3 _probe/scripts/vercel_probe.py env --project py --key PROBE_SETTING --value "$MID_VALUE"
+        env:
+          MID_VALUE: ${{ inputs.mid_value }}
+          VERCEL_TOKEN: ${{ steps.token.outputs.token }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+
+      - name: Deploy, stamped, without the domains
+        id: deploy
+        working-directory: py
+        run: |
+          URL="$(NODE_OPTIONS="--require ./dns-preload.js" vercel deploy --prod --yes --skip-domain \
+            --token "$TOKEN" \
+            --meta "kdf_version=$VERSION" \
+            --meta "kdf_commit=$GITHUB_SHA" \
+            --meta "kdf_run_id=$GITHUB_RUN_ID" \
+            --meta "kdf_run_attempt=$GITHUB_RUN_ATTEMPT" \
+            --meta "kdf_started_at=$STARTED" | tail -n 1)"
+          case "$URL" in
+            https://*) ;;
+            *) echo "::error::vercel deploy printed no deployment URL"; exit 1 ;;
+          esac
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "created, not promoted, at $(date -u +%Y-%m-%dT%H:%M:%S.%3NZ): $URL"
+        env:
+          TOKEN: ${{ steps.token.outputs.token }}
+          VERSION: ${{ inputs.version }}
+          STARTED: ${{ steps.start.outputs.started_at }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: Change the setting after the deployment exists
+        if: inputs.mid_change == 'after_deploy'
+        run: python3 _probe/scripts/vercel_probe.py env --project py --key PROBE_SETTING --value "$MID_VALUE"
+        env:
+          MID_VALUE: ${{ inputs.mid_value }}
+          VERCEL_TOKEN: ${{ steps.token.outputs.token }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+
+      - name: Smoke the candidate through the bypass
+        run: python3 _probe/scripts/vercel_probe.py smoke --url "$URL" --path /healthz --expect ok
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+
+      - name: What the candidate reads
+        run: python3 _probe/scripts/vercel_probe.py setting --url "$URL" --path /setting --expect-setting "$EXPECT"
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+          EXPECT: ${{ inputs.expect_setting }}
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+
+      - name: The candidate's stamped start against the live deployment's
+        run: |
+          if [ -n "$EXPECT" ]; then
+            python3 _probe/scripts/vercel_probe.py fresh --started "$STARTED" --expect "$EXPECT"
+          else
+            python3 _probe/scripts/vercel_probe.py fresh --started "$STARTED"
+          fi
+        env:
+          STARTED: ${{ steps.start.outputs.started_at }}
+          EXPECT: ${{ inputs.expect_fresh }}
+          VERCEL_TOKEN: ${{ steps.token.outputs.token }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: Promote to the production domains
+        if: inputs.promote
+        working-directory: py
+        run: |
+          echo "promote called at $(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+          NODE_OPTIONS="--require ./dns-preload.js" vercel promote "$URL" --yes --token "$TOKEN"
+          echo "promote returned at $(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+          TOKEN: ${{ steps.token.outputs.token }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: When every alias first serves the candidate
+        if: inputs.promote
+        run: python3 _probe/scripts/vercel_probe.py watch --url "$URL" --path /whoami
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+          VERCEL_TOKEN: ${{ steps.token.outputs.token }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+
+      - name: The stamp, the production target and every alias
+        if: always() && steps.deploy.outputs.url != ''
+        run: python3 _probe/scripts/vercel_probe.py target --url "$URL" --version "$VERSION" --started "$STARTED"
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+          VERSION: ${{ inputs.version }}
+          STARTED: ${{ steps.start.outputs.started_at }}
+          VERCEL_TOKEN: ${{ steps.token.outputs.token }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+  times:
+    name: The attempt's start against every step
+    needs: deploy
+    if: always() && needs.deploy.outputs.started_at != ''
+    runs-on: ubuntu-slim
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out the probe scripts
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: Needless2Say/probe-cicd
+          ref: main
+          sparse-checkout: scripts
+          path: _probe
+          persist-credentials: false
+
+      - name: Read the attempt's times
+        run: >-
+          python3 _probe/scripts/gh_probe.py attempt-times --repo "$GITHUB_REPOSITORY" --run "$GITHUB_RUN_ID"
+          --attempt "$GITHUB_RUN_ATTEMPT" --stamp "$STARTED"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STARTED: ${{ needs.deploy.outputs.started_at }}

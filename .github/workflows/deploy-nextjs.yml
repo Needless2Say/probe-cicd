@@ -1,0 +1,282 @@
+# Scratch probe, the Next.js deploy path a bot's redeploy would take, called with `secrets: inherit`.
+#
+# Built here for production, deployed prebuilt without the domains, smoked through the protection bypass on a route
+# that loads the app's env module, then promoted, the shape a later design gives every unattended Next.js redeploy.
+# The deployment is stamped as the Python probe stamps it. A run may change the setting after the build and before the
+# deployment exists, to show where a prebuilt deployment's server values come from, or delete the Sensitive value
+# first, to show the smoke refusing a deployment that would fail at its first request. Every line is a comparison, an
+# id, a hostname or a time, never a token, a bypass value or a setting's value.
+
+name: Probe, Next.js deploy (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: The caller's environment holding the scratch project's token, ids and bypass value
+        type: string
+        default: next
+      version:
+        description: The version written into the stamp
+        type: string
+        default: probe
+      smoke_path:
+        description: The route the smoke requests, one that loads the env module
+        type: string
+        default: /api/smoke
+      mid_change:
+        description: none, after_build or after_deploy, when the job sets the two settings to mid_value
+        type: string
+        default: none
+      mid_value:
+        description: The named scratch value the mid change sets
+        type: string
+        default: four
+      drop_sensitive:
+        description: Delete PROBE_SENSITIVE before the build, so the smoke must find the deployment failing
+        type: boolean
+        default: false
+      expect_setting:
+        description: The named value the server is expected to read at its request, reported and never failing
+        type: string
+        default: ""
+      expect_public:
+        description: The named value the build is expected to have written in, reported and never failing
+        type: string
+        default: ""
+      promote:
+        description: Whether to promote the candidate after the smoke
+        type: boolean
+        default: true
+      expect_fresh:
+        description: The freshness verdict expected before the promotion, or empty to report it alone
+        type: string
+        default: ""
+    outputs:
+      url:
+        description: The candidate's deployment URL
+        value: ${{ jobs.deploy.outputs.url }}
+      started_at:
+        description: The time the deploy job's first step recorded
+        value: ${{ jobs.deploy.outputs.started_at }}
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  deploy:
+    name: Deploy, Next.js
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: probe-deploy-${{ github.repository }}-${{ inputs.environment }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    outputs:
+      url: ${{ steps.deploy.outputs.url }}
+      started_at: ${{ steps.start.outputs.started_at }}
+    steps:
+      - name: Record the start, before any setting is read
+        id: start
+        run: |
+          started="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+          echo "started_at=$started" >> "$GITHUB_OUTPUT"
+          echo "first step at $started, run $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT"
+
+      - name: Check out the caller
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Check out the probe scripts
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: Needless2Say/probe-cicd
+          ref: main
+          sparse-checkout: scripts
+          path: _probe
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: "24"
+
+      - name: Install the Vercel CLI
+        run: npm install -g vercel@58.5.1
+
+      - name: Prepare the token
+        id: token
+        run: |
+          TOKEN="$(printf '%s' "$VERCEL_TOKEN" | tr -d '[:space:]')"
+          if [ -z "$TOKEN" ]; then
+            echo "::error::VERCEL_TOKEN is empty in this environment"
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+
+      - name: Delete the Sensitive value before the build
+        if: inputs.drop_sensitive
+        run: python3 _probe/scripts/vercel_probe.py env --project next --key PROBE_SENSITIVE --delete
+        env:
+          VERCEL_TOKEN: ${{ steps.token.outputs.token }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+
+      - name: Pull the project's settings and build values
+        working-directory: next
+        run: |
+          echo "pull at $(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+          vercel pull --yes --environment=production --token "$TOKEN"
+        env:
+          TOKEN: ${{ steps.token.outputs.token }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: Build for production
+        working-directory: next
+        run: |
+          vercel build --prod
+          echo "built at $(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: Change the settings after the build, before the deployment exists
+        if: inputs.mid_change == 'after_build'
+        run: |
+          python3 _probe/scripts/vercel_probe.py env --project next --key PROBE_SETTING --value "$MID_VALUE"
+          python3 _probe/scripts/vercel_probe.py env --project next --key NEXT_PUBLIC_PROBE_SETTING --value "$MID_VALUE"
+        env:
+          MID_VALUE: ${{ inputs.mid_value }}
+          VERCEL_TOKEN: ${{ steps.token.outputs.token }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+
+      - name: Deploy the prebuilt output, stamped, without the domains
+        id: deploy
+        working-directory: next
+        run: |
+          URL="$(vercel deploy --prebuilt --prod --yes --skip-domain \
+            --token "$TOKEN" \
+            --meta "kdf_version=$VERSION" \
+            --meta "kdf_commit=$GITHUB_SHA" \
+            --meta "kdf_run_id=$GITHUB_RUN_ID" \
+            --meta "kdf_run_attempt=$GITHUB_RUN_ATTEMPT" \
+            --meta "kdf_started_at=$STARTED" | tail -n 1)"
+          case "$URL" in
+            https://*) ;;
+            *) echo "::error::vercel deploy printed no deployment URL"; exit 1 ;;
+          esac
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "created, not promoted, at $(date -u +%Y-%m-%dT%H:%M:%S.%3NZ): $URL"
+        env:
+          TOKEN: ${{ steps.token.outputs.token }}
+          VERSION: ${{ inputs.version }}
+          STARTED: ${{ steps.start.outputs.started_at }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: Change the settings after the deployment exists
+        if: inputs.mid_change == 'after_deploy'
+        run: |
+          python3 _probe/scripts/vercel_probe.py env --project next --key PROBE_SETTING --value "$MID_VALUE"
+          python3 _probe/scripts/vercel_probe.py env --project next --key NEXT_PUBLIC_PROBE_SETTING --value "$MID_VALUE"
+        env:
+          MID_VALUE: ${{ inputs.mid_value }}
+          VERCEL_TOKEN: ${{ steps.token.outputs.token }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+
+      - name: Smoke the candidate's env route through the bypass
+        run: python3 _probe/scripts/vercel_probe.py smoke --url "$URL" --path "$SMOKE_PATH" --expect "$EXPECT"
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+          SMOKE_PATH: ${{ inputs.smoke_path }}
+          EXPECT: ${{ inputs.drop_sensitive && 'error' || 'ok' }}
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+
+      - name: What the candidate reads at its request and what its build wrote in
+        run: >-
+          python3 _probe/scripts/vercel_probe.py setting --url "$URL" --path /api/setting
+          --expect-setting "$EXPECT_SETTING" --expect-public "$EXPECT_PUBLIC"
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+          EXPECT_SETTING: ${{ inputs.expect_setting }}
+          EXPECT_PUBLIC: ${{ inputs.expect_public }}
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+
+      - name: The candidate's stamped start against the live deployment's
+        run: |
+          if [ -n "$EXPECT" ]; then
+            python3 _probe/scripts/vercel_probe.py fresh --started "$STARTED" --expect "$EXPECT"
+          else
+            python3 _probe/scripts/vercel_probe.py fresh --started "$STARTED"
+          fi
+        env:
+          STARTED: ${{ steps.start.outputs.started_at }}
+          EXPECT: ${{ inputs.expect_fresh }}
+          VERCEL_TOKEN: ${{ steps.token.outputs.token }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: Promote to the production domains
+        if: inputs.promote && !inputs.drop_sensitive
+        working-directory: next
+        run: |
+          echo "promote called at $(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+          vercel promote "$URL" --yes --token "$TOKEN"
+          echo "promote returned at $(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+          TOKEN: ${{ steps.token.outputs.token }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: When every alias first serves the candidate
+        if: inputs.promote && !inputs.drop_sensitive
+        run: python3 _probe/scripts/vercel_probe.py watch --url "$URL" --path /api/whoami
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+          VERCEL_TOKEN: ${{ steps.token.outputs.token }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+
+      - name: The stamp, the production target and every alias
+        if: always() && steps.deploy.outputs.url != ''
+        run: python3 _probe/scripts/vercel_probe.py target --url "$URL" --version "$VERSION" --started "$STARTED"
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+          VERSION: ${{ inputs.version }}
+          STARTED: ${{ steps.start.outputs.started_at }}
+          VERCEL_TOKEN: ${{ steps.token.outputs.token }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+  times:
+    name: The attempt's start against every step
+    needs: deploy
+    if: always() && needs.deploy.outputs.started_at != ''
+    runs-on: ubuntu-slim
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out the probe scripts
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: Needless2Say/probe-cicd
+          ref: main
+          sparse-checkout: scripts
+          path: _probe
+          persist-credentials: false
+
+      - name: Read the attempt's times
+        run: >-
+          python3 _probe/scripts/gh_probe.py attempt-times --repo "$GITHUB_REPOSITORY" --run "$GITHUB_RUN_ID"
+          --attempt "$GITHUB_RUN_ATTEMPT" --stamp "$STARTED"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STARTED: ${{ needs.deploy.outputs.started_at }}

@@ -1,0 +1,58 @@
+# Scratch probe, a run's identity read from inside a reusable workflow, where a deployer check runs.
+#
+# Prints the event, the actor and its id, the triggering actor, the attempt and the caller's workflow reference as the
+# runner gives them in a called job, and holds the actor id to the bot user's id and the App's id the caller passes.
+# Logins, ids and references alone, nothing secret.
+
+name: Probe, identity (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      bot_id:
+        description: The dispatching bot's user id, when a bot dispatched the run
+        type: string
+        default: ""
+      app_id:
+        description: The dispatching App's id, when a bot dispatched the run
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  identity:
+    name: Identity inside the reusable
+    runs-on: ubuntu-slim
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the probe scripts
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: Needless2Say/probe-cicd
+          ref: main
+          sparse-checkout: scripts
+          path: _probe
+          persist-credentials: false
+
+      - name: The identity a called job sees
+        run: >-
+          python3 _probe/scripts/gh_probe.py identity --where "the reusable's job"
+          --bot-id "$BOT_ID" --app-id "$APP_ID"
+        env:
+          BOT_ID: ${{ inputs.bot_id }}
+          APP_ID: ${{ inputs.app_id }}
+
+      - name: The same fields from the github context
+        run: |
+          echo "actor $ACTOR, actor_id $ACTOR_ID, triggering_actor $TRIGGERING, attempt $ATTEMPT, event $EVENT"
+          echo "workflow_ref $WORKFLOW_REF"
+        env:
+          ACTOR: ${{ github.actor }}
+          ACTOR_ID: ${{ github.actor_id }}
+          TRIGGERING: ${{ github.triggering_actor }}
+          ATTEMPT: ${{ github.run_attempt }}
+          EVENT: ${{ github.event_name }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
