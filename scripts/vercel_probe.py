@@ -500,13 +500,16 @@ def cmd_watch(vercel: Vercel, args: argparse.Namespace) -> int:
         _status, candidate = deployment(vercel, host)
         if candidate:
             sources = alias_sources(vercel, candidate)
-            if candidate.get("aliasAssigned") and every_alias(sources):
+            # aliasAssigned already read True on an unpromoted candidate, and the project's domains exist before any
+            # promotion, so only the two lists an assignment fills mark when the aliases appear
+            if sources["the aliases endpoint"] or sources["the deployment's alias"]:
                 break
         time.sleep(2)
     aliases = every_alias(sources)
     say(f"- the API showed {len(aliases)} aliases at {now()}")
     report_sources(sources)
     first: dict[str, str] = {}
+    began = time.monotonic()
     while time.monotonic() - began < args.timeout and len(first) < len(aliases):
         for alias in aliases:
             if alias in first:
