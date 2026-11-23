@@ -302,6 +302,65 @@ def deployment(vercel: Vercel, id_or_host: str) -> tuple[int, dict]:
     return status, answer if isinstance(answer, dict) and status == 200 else {}
 
 
+def alias_sources(vercel: Vercel, candidate: dict) -> dict[str, list[str]]:
+    """
+    The hostnames a deployment may answer on, by where each was read.
+
+    The first run's deployment kept its own `alias` list empty after its promotion, so the aliases endpoint and the
+    project's production domains are read beside it, and each source is reported on its own.
+
+    Args:
+        vercel: the API
+        candidate: the deployment as read
+
+    Returns:
+        dict[str, list[str]]: each source's hostnames
+    """
+    status, answer = vercel.call("GET", f"/v2/deployments/{candidate.get('id')}/aliases")
+    listed = (answer.get("aliases") or []) if isinstance(answer, dict) and status == 200 else []
+    status_p, domains = vercel.call("GET", f"/v9/projects/{candidate.get('projectId')}/domains")
+    named = (domains.get("domains") or []) if isinstance(domains, dict) and status_p == 200 else []
+    return {
+        "the aliases endpoint": [str(item["alias"]) for item in listed if isinstance(item, dict) and item.get("alias")],
+        "the project's production domains": [
+            str(item["name"])
+            for item in named
+            if isinstance(item, dict) and item.get("name") and not item.get("redirect") and not item.get("gitBranch")
+        ],
+        "the deployment's alias": [str(name) for name in candidate.get("alias") or []],
+        "the deployment's automaticAliases": [str(name) for name in candidate.get("automaticAliases") or []],
+    }
+
+
+def every_alias(sources: dict[str, list[str]]) -> list[str]:
+    """
+    Every hostname from every source, each once, in the order first seen.
+
+    Args:
+        sources: each source's hostnames
+
+    Returns:
+        list[str]: the hostnames
+    """
+    seen: list[str] = []
+    for names in sources.values():
+        for name in names:
+            if name not in seen:
+                seen.append(name)
+    return seen
+
+
+def report_sources(sources: dict[str, list[str]]) -> None:
+    """
+    Each source's hostnames, so the run shows where Vercel lists a promoted deployment's aliases.
+
+    Args:
+        sources: each source's hostnames
+    """
+    for source, names in sources.items():
+        say(f"- {source} lists {len(names)}: {', '.join(names) or 'none'}")
+
+
 def live(vercel: Vercel, project: str) -> tuple[str, dict]:
     """
     The project's production target, read from the project and then as a deployment.
@@ -353,7 +412,9 @@ def cmd_target(vercel: Vercel, args: argparse.Namespace) -> int:
     say(f"- targets.production carries the fields {sorted(production)}")
     stamped = (production.get("meta") or {}).get("kdf_started_at") == args.started
     say(f"- targets.production carries the stamp: {yes(stamped)}")
-    for alias in candidate.get("alias") or []:
+    sources = alias_sources(vercel, candidate)
+    report_sources(sources)
+    for alias in every_alias(sources):
         status_a, by_alias = vercel.call("GET", f"/v4/aliases/{alias}")
         by_alias = by_alias if isinstance(by_alias, dict) else {}
         alias_meta = (by_alias.get("deployment") or {}).get("meta") or {}
@@ -434,14 +495,17 @@ def cmd_watch(vercel: Vercel, args: argparse.Namespace) -> int:
     """
     host = host_of(args.url)
     began = time.monotonic()
-    candidate: dict = {}
+    sources: dict[str, list[str]] = {}
     while time.monotonic() - began < args.timeout:
         _status, candidate = deployment(vercel, host)
-        if candidate.get("aliasAssigned") and candidate.get("alias"):
-            break
+        if candidate:
+            sources = alias_sources(vercel, candidate)
+            if candidate.get("aliasAssigned") and every_alias(sources):
+                break
         time.sleep(2)
-    aliases = list(candidate.get("alias") or [])
-    say(f"- the API showed {len(aliases)} aliases at {now()}: {', '.join(aliases) or 'none'}")
+    aliases = every_alias(sources)
+    say(f"- the API showed {len(aliases)} aliases at {now()}")
+    report_sources(sources)
     first: dict[str, str] = {}
     while time.monotonic() - began < args.timeout and len(first) < len(aliases):
         for alias in aliases:
