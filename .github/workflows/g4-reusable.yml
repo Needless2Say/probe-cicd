@@ -1,0 +1,56 @@
+# Scratch probe, an OIDC proof minted in a reusable workflow's job, its audience a scratch entry's digest. Prints the
+# claims a verifier would hold to and whether the signature verifies, never the token, which is kept as an artifact
+# of this run for the checks a fresh process makes later.
+
+name: Probe, an OIDC proof from a reusable
+
+on:
+  workflow_call:
+    inputs:
+      entry:
+        description: A scratch entry's text, whose digest is the audience
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    name: G4, a proof minted in the reusable's job
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out the probe scripts
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: Needless2Say/probe-cicd
+          ref: main
+          sparse-checkout: scripts
+          path: _probe
+          persist-credentials: false
+
+      - name: The entry's digest as the audience
+        id: digest
+        env:
+          ENTRY: ${{ inputs.entry }}
+        run: echo "aud=kdf-anchor:sha256:$(printf '%s' "$ENTRY" | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Mint the proof, kept in a file
+        env:
+          AUD: ${{ steps.digest.outputs.aud }}
+        run: python3 _probe/scripts/oidc_probe.py mint --audience "$AUD" --out "$RUNNER_TEMP/proof.jwt"
+
+      - name: The claims and the signature
+        env:
+          AUD: ${{ steps.digest.outputs.aud }}
+        run: python3 _probe/scripts/oidc_probe.py claims --file "$RUNNER_TEMP/proof.jwt" --expect-audience "$AUD"
+
+      - name: Keep the proof for a fresh process's check
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g4-proof
+          path: ${{ runner.temp }}/proof.jwt
+          retention-days: 30
