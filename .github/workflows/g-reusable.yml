@@ -2,8 +2,8 @@
 #
 # g1  names the caller's `dev` environment and waits in the caller's run group, then reads G1_SECRET at its start and
 #     says which scratch value it holds by a label, the first or the second, never the value, which GitHub masks.
-# g3  takes a group of its own, sleeps three minutes and prints its start and end, so two runs started together show
-#     whether the caller's group still holds while this job runs.
+# g3  takes a group of its own run, sleeps three minutes and prints its start and end, so two runs started together
+#     show whether the caller's group still holds while this job runs.
 
 name: Probe, the reusable's jobs
 
@@ -46,8 +46,9 @@ jobs:
     name: G3, a reusable job in a group of its own
     if: inputs.case == 'g3'
     runs-on: ubuntu-slim
+    # a group of this run alone, so two runs never wait on each other here, and any wait is the caller's group's
     concurrency:
-      group: g3-callee
+      group: g3-callee-${{ github.run_id }}
       cancel-in-progress: false
     permissions:
       contents: read
