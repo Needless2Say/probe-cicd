@@ -1,9 +1,9 @@
 # Scratch probe, a reusable workflow's jobs, called with `secrets: inherit`. Generic code, no value of its own.
 #
 # g1  names the caller's `dev` environment and waits in the caller's run group, then reads G1_SECRET at its start and
-#     says which scratch value it holds, g1-one or g1-two, never the value.
-# g3  takes a group of its own, sleeps a minute and prints its start and end, so two runs show whether the caller's
-#     group still holds while this job runs.
+#     says which scratch value it holds by a label, the first or the second, never the value, which GitHub masks.
+# g3  takes a group of its own, sleeps three minutes and prints its start and end, so two runs started together show
+#     whether the caller's group still holds while this job runs.
 
 name: Probe, the reusable's jobs
 
@@ -38,8 +38,9 @@ jobs:
           held="$(printf '%s' "$G1_SECRET" | sha256sum | cut -d' ' -f1)"
           one="$(printf '%s' 'g1-one' | sha256sum | cut -d' ' -f1)"
           two="$(printf '%s' 'g1-two' | sha256sum | cut -d' ' -f1)"
-          if [ "$held" = "$one" ]; then word=g1-one; elif [ "$held" = "$two" ]; then word=g1-two; else word=neither; fi
-          echo "- the reusable's job started at $now and reads G1_SECRET as $word"
+          # a label and never the value, which GitHub masks wherever it appears, and drops from any output holding it
+          if [ "$held" = "$one" ]; then word=first; elif [ "$held" = "$two" ]; then word=second; else word=neither; fi
+          echo "- the reusable's job started at $now and reads G1_SECRET as the $word value"
 
   g3:
     name: G3, a reusable job in a group of its own
@@ -51,8 +52,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: A minute in its own group
+      - name: Three minutes in its own group
         run: |
           echo "- run ${GITHUB_RUN_ID}, the reusable's job started at $(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
-          sleep 60
+          sleep 180
           echo "- run ${GITHUB_RUN_ID}, the reusable's job ended at $(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
