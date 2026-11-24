@@ -1,0 +1,58 @@
+# Scratch probe, a reusable workflow's jobs, called with `secrets: inherit`. Generic code, no value of its own.
+#
+# g1  names the caller's `dev` environment and waits in the caller's run group, then reads G1_SECRET at its start and
+#     says which scratch value it holds, g1-one or g1-two, never the value.
+# g3  takes a group of its own, sleeps a minute and prints its start and end, so two runs show whether the caller's
+#     group still holds while this job runs.
+
+name: Probe, the reusable's jobs
+
+on:
+  workflow_call:
+    inputs:
+      case:
+        description: g1 or g3
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  g1:
+    name: G1, the secret read at this job's start after a wait
+    if: inputs.case == 'g1'
+    runs-on: ubuntu-slim
+    environment: dev
+    concurrency:
+      group: g1-wait-${{ github.run_id }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - name: Which scratch value the secret holds now
+        env:
+          G1_SECRET: ${{ secrets.G1_SECRET }}
+        run: |
+          now="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+          held="$(printf '%s' "$G1_SECRET" | sha256sum | cut -d' ' -f1)"
+          one="$(printf '%s' 'g1-one' | sha256sum | cut -d' ' -f1)"
+          two="$(printf '%s' 'g1-two' | sha256sum | cut -d' ' -f1)"
+          if [ "$held" = "$one" ]; then word=g1-one; elif [ "$held" = "$two" ]; then word=g1-two; else word=neither; fi
+          echo "- the reusable's job started at $now and reads G1_SECRET as $word"
+
+  g3:
+    name: G3, a reusable job in a group of its own
+    if: inputs.case == 'g3'
+    runs-on: ubuntu-slim
+    concurrency:
+      group: g3-callee
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - name: A minute in its own group
+        run: |
+          echo "- run ${GITHUB_RUN_ID}, the reusable's job started at $(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+          sleep 60
+          echo "- run ${GITHUB_RUN_ID}, the reusable's job ended at $(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
