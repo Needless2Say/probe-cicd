@@ -1,0 +1,27 @@
+# Scratch probe, G7, a reusable whose marker says which of its commits a run executed. Prints the marker, the run's
+# attempt and the caller's G7_FLOOR as read at this job's start, and fails when the caller's G7_FAIL is yes.
+
+name: Probe, a reusable with a marker
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  work:
+    name: G7, the reusable's job
+    runs-on: ubuntu-slim
+    permissions:
+      contents: read
+    steps:
+      - name: The marker, the attempt and the floor
+        env:
+          FLOOR: ${{ vars.G7_FLOOR }}
+          FAIL: ${{ vars.G7_FAIL }}
+        run: |
+          echo "- marker: one"
+          echo "- attempt ${GITHUB_RUN_ATTEMPT}, G7_FLOOR read at this job's start as ${FLOOR:-nothing}"
+          if [ "$FAIL" = "yes" ]; then echo "- failing, as G7_FAIL asks"; exit 1; fi
+          echo "- passed"
